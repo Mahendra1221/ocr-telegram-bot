@@ -1,64 +1,63 @@
-import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-import pytesseract
-from PIL import Image
+import telebot
+import easyocr
 import re
-import os
+import cv2
+import numpy as np
+from PIL import Image
+import requests
+from io import BytesIO
 
-TOKEN = "YOUR_BOT_TOKEN_HERE"
+# ⛔️ Directly paste your TOKEN here for now
+TOKEN = '8071817525:AAFPJfV6j-JT4hgujpli2lCPZdbwtMFLpBY'
+bot = telebot.TeleBot(TOKEN)
 
-def extract_details(text):
-    text = text.replace('\n', ' ')
-    lines = text.split('\n')
-    name = ""
-    number = ""
-    student_class = ""
+reader = easyocr.Reader(['en'], gpu=False)
 
-    for line in lines:
-        line = line.strip()
-        if any(noise in line.lower() for noise in ["google", "youtube", "search", "dashboard", "maps", "pm", "am"]):
-            continue
-        if "@gmail" in line:
-            continue
+@bot.message_handler(content_types=['photo'])
+def handle_image(message):
+    try:
+        file_id = message.photo[-1].file_id
+        file_info = bot.get_file(file_id)
+        file = requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}")
+        image = Image.open(BytesIO(file.content)).convert('RGB')
+        image_np = np.array(image)
+        results = reader.readtext(image_np, detail=0)
 
-        if "+91" in line or "Mob" in line or re.search(r'\b[6-9]\d{9}\b', line):
-            number_match = re.search(r'(\+91[-\s]?|Mob[:\s]?)?(\d{10})', line)
-            if number_match:
-                number = number_match.group(2)
+        name = ""
+        number = ""
+        std_class = ""
 
-        class_match = re.search(r'\b(9th|10th|11th|12th)\b', line, re.IGNORECASE)
-        if class_match:
-            student_class = class_match.group(1)
+        for line in results:
+            text = line.strip()
 
-        if len(line) > len(name) and not any(x in line for x in [number, student_class]) and not line.isdigit():
-            name = line
+            # Number detection
+            if re.search(r"\+91[-\s]?\d{10}", text) or "Mob" in text:
+                number = re.findall(r"\+91[-\s]?\d{10}", text)
+                number = number[0] if number else text
 
-    return name.strip(), number.strip(), student_class.strip()
+            # Class detection
+            if any(c in text for c in ["9th", "10th", "11th", "12th"]):
+                std_class = text
 
-def process_image(image_path):
-    image = Image.open(image_path)
-    text = pytesseract.image_to_string(image)
-    return extract_details(text)
+            # Name detection (bold/larger words filtering)
+            if (
+                text not in ["Google", "YouTube", "Back", "Dashboard", "Search", "PM", "AM", "Maps", "Content", "Marketing", "Leads"]
+                and not text.lower().endswith("@gmail.com")
+                and len(text.split()) <= 5
+                and len(text) > 3
+            ):
+                if name == "":
+                    name = text
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send me an image, and I’ll extract details!")
+        reply = f"""Name - {name}
+Number - {number}
+Class - {std_class}
+Amount - 
+Transaction ID / UTR -"""
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = update.message.photo[-1]
-    file = await context.bot.get_file(photo.file_id)
-    file_path = f"{photo.file_id}.jpg"
-    await file.download_to_drive(file_path)
-    
-    name, number, student_class = process_image(file_path)
-    os.remove(file_path)
-    
-    message = f"Name - {name}\nNumber - {number}\nClass - {student_class}\nAmount - \nTransaction ID / UTR -"
-    await update.message.reply_text(message)
+        bot.reply_to(message, reply)
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.run_polling()
+    except Exception as e:
+        bot.reply_to(message, f"Error: {str(e)}")
+
+bot.infinity_polling(timeout=60, long_polling_timeout=60)
