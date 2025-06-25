@@ -1,63 +1,92 @@
 import telebot
 import easyocr
-import re
 import cv2
 import numpy as np
+import re
 from PIL import Image
-import requests
 from io import BytesIO
 
-# ⛔️ Directly paste your TOKEN here for now
-TOKEN = '8071817525:AAFPJfV6j-JT4hgujpli2lCPZdbwtMFLpBY'
-bot = telebot.TeleBot(TOKEN)
+# 🔐 Replace with your own token
+TOKEN = "8071817525:AAFPJfV6j-JT4hgujpli2lCPZdbwtMFLpBY"
 
-reader = easyocr.Reader(['en'], gpu=False)
+bot = telebot.TeleBot(TOKEN)
+reader = easyocr.Reader(['en'])
+
+IGNORED_WORDS = ['google', 'maps', 'youtube', 'pm', 'am', 'battery', 'search', 'dashboard', 'back',
+                 'filter', 'call', 'view', 'clear', 'superhot', 'hot', 'qualified', 'mid hot']
+VALID_CLASSES = ['9th', '10th', '11th', '12th']
+
+def clean_text(text):
+    text = text.strip()
+    text = re.sub(r'[^\w\s@+-.]', '', text)
+    return text.lower()
+
+def extract_details_from_image(img):
+    image = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    results = reader.readtext(image)
+
+    name = ""
+    number = ""
+    class_name = ""
+
+    possible_names = []
+
+    for (bbox, text, prob) in results:
+        text_clean = clean_text(text)
+
+        if not text_clean or any(word in text_clean for word in IGNORED_WORDS):
+            continue
+
+        # 📍 Number detection
+        if re.search(r"\+91[-\s]?\d{10}", text_clean) or "mob" in text_clean:
+            number = re.findall(r"\+91[-\s]?\d{10}", text_clean)
+            if number:
+                number = number[0]
+            continue
+
+        # 🎓 Class detection
+        if any(cls in text_clean for cls in VALID_CLASSES):
+            for cls in VALID_CLASSES:
+                if cls in text_clean:
+                    class_name = cls
+                    break
+            continue
+
+        # 📛 Name logic — ignore emails, unwanted short words
+        if "@gmail" in text_clean or len(text_clean) < 3:
+            continue
+
+        # 🧠 Take all possible names for now
+        possible_names.append((text, prob, bbox[0][0]))
+
+    # 💡 Select the largest font or left-most as Name
+    if possible_names:
+        possible_names.sort(key=lambda x: (-x[1], x[2]))  # sort by confidence desc, then left position
+        name = possible_names[0][0]
+
+    # 🧼 Final formatting
+    name = name.strip()
+    number = number.strip()
+    class_name = class_name.strip()
+
+    return name, number, class_name
 
 @bot.message_handler(content_types=['photo'])
-def handle_image(message):
-    try:
-        file_id = message.photo[-1].file_id
-        file_info = bot.get_file(file_id)
-        file = requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}")
-        image = Image.open(BytesIO(file.content)).convert('RGB')
-        image_np = np.array(image)
-        results = reader.readtext(image_np, detail=0)
+def handle_photo(message):
+    file_info = bot.get_file(message.photo[-1].file_id)
+    downloaded_file = bot.download_file(file_info.file_path)
+    image = Image.open(BytesIO(downloaded_file))
 
-        name = ""
-        number = ""
-        std_class = ""
+    name, number, class_name = extract_details_from_image(image)
 
-        for line in results:
-            text = line.strip()
-
-            # Number detection
-            if re.search(r"\+91[-\s]?\d{10}", text) or "Mob" in text:
-                number = re.findall(r"\+91[-\s]?\d{10}", text)
-                number = number[0] if number else text
-
-            # Class detection
-            if any(c in text for c in ["9th", "10th", "11th", "12th"]):
-                std_class = text
-
-            # Name detection (bold/larger words filtering)
-            if (
-                text not in ["Google", "YouTube", "Back", "Dashboard", "Search", "PM", "AM", "Maps", "Content", "Marketing", "Leads"]
-                and not text.lower().endswith("@gmail.com")
-                and len(text.split()) <= 5
-                and len(text) > 3
-            ):
-                if name == "":
-                    name = text
-
-        reply = f"""Name - {name}
+    # ✅ FIXED FORMAT (2 lines always blank at end)
+    response = f"""Name - {name}
 Number - {number}
-Class - {std_class}
-Amount - 
+Class - {class_name}
+Amount -
 Transaction ID / UTR -"""
 
-        bot.reply_to(message, reply)
+    bot.reply_to(message, response)
 
-    except Exception as e:
-        bot.reply_to(message, f"Error: {str(e)}")
-
-bot.infinity_polling(timeout=60, long_polling_timeout=60)
+print("🤖 Bot is running...")
+bot.infinity_polling()
